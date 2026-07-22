@@ -5,7 +5,7 @@ from sqlalchemy import MetaData, Table, text
 
 from config.settings import POSTGRES_SCHEMA
 from drivers.database import get_engine
-from utils.date_utils import now_sao_paulo
+from utils.date_utils import now_sao_paulo_naive
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ def load_to_staging(df: pd.DataFrame, table_name: str, if_exists: str = "replace
     df = df.copy()
     if "id_negociacao" in df.columns:
         df = df.drop_duplicates(subset=["id_negociacao"], keep="last")
-    df["time_import"] = now_sao_paulo()
+    df["time_import"] = now_sao_paulo_naive()
 
     engine = get_engine()
 
@@ -63,7 +63,7 @@ def upsert_staging(df: pd.DataFrame, table_name: str, staging_table_name: str, c
         return
 
     df = df.copy()
-    df["time_import"] = now_sao_paulo()
+    df["time_import"] = now_sao_paulo_naive()
     # A stage tem PK em chave_primaria — garante que o lote não tem ids repetidos
     df = df.drop_duplicates(subset=[chave_primaria], keep="last")
 
@@ -147,7 +147,7 @@ def listar_candidatos_deletados(
 
     # A stage tem PK em chave_primaria — ids repetidos quebrariam o insert
     df = pd.DataFrame({chave_primaria: sorted(set(ids_listagem))})
-    df["time_import"] = now_sao_paulo()
+    df["time_import"] = now_sao_paulo_naive()
 
     safe_chunksize = min(500, max(1, 30000 // len(df.columns)))
 

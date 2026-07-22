@@ -13,6 +13,13 @@ def now_sao_paulo() -> datetime:
     return datetime.now(TIMEZONE_SP)
 
 
+# Horário de São Paulo SEM tzinfo. O DW grava horário local em colunas
+# "timestamp without time zone" — e um datetime tz-aware seria convertido para UTC
+# pelo to_sql do pandas na hora de gravar, deixando a coluna 3h adiantada.
+def now_sao_paulo_naive() -> datetime:
+    return now_sao_paulo().replace(tzinfo=None)
+
+
 def format_iso(dt: datetime) -> str:
     return dt.isoformat()
 

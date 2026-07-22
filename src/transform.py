@@ -2,6 +2,8 @@ import logging
 
 import pandas as pd
 
+from utils.date_utils import TIMEZONE_SP
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,10 +88,15 @@ def transform_deals(deals: list[dict], lookups: dict) -> pd.DataFrame:
     # Normaliza todo valor vazio (""/espaços) para None -> NULL no banco
     df = df.map(vazio_para_none)
 
-    # Converte colunas de data de string ISO 8601 para datetime
+    # Converte as datas de string ISO 8601 para o horário local de São Paulo, sem tz.
+    # A API devolve com offset (-03:00) e o to_sql do pandas grava qualquer coluna
+    # tz-aware convertida para UTC — o DW ficaria 3h adiantado. utc=True primeiro
+    # normaliza tudo (inclusive offsets diferentes por horário de verão antigo),
+    # depois convertemos para SP e removemos o tz.
     for col in ["data_criacao", "data_atualizacao", "data_fechamento"]:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
+            serie = pd.to_datetime(df[col], errors="coerce", utc=True)
+            df[col] = serie.dt.tz_convert(TIMEZONE_SP).dt.tz_localize(None)
 
     logger.info("Transform concluído: %d linhas, %d colunas", len(df), len(df.columns))
     return df

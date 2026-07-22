@@ -19,6 +19,7 @@ from src.extract import (
 from src.transform import transform_deals
 from src.load import listar_candidatos_deletados, marcar_registros_deletados, upsert_staging
 from src.watermark import get_cutoff_atualizacao
+from utils.date_utils import now_sao_paulo_naive
 from utils.db_logger import DBLogger
 from utils.log_mail_message import send_email
 from utils.logger import setup_logger
@@ -33,7 +34,7 @@ OPERACAO = "etl_incremental_negociacoes"
 def run_etl_incremental():
 
     db_logger = DBLogger()
-    start_time_dt = datetime.datetime.now()
+    start_time_dt = now_sao_paulo_naive()
 
     try:
         setup_logger()
@@ -68,7 +69,7 @@ def run_etl_incremental():
                 operation=OPERACAO,
                 status="SUCCESS",
                 start_time=start_time_dt,
-                end_time=datetime.datetime.now(),
+                end_time=now_sao_paulo_naive(),
             )
             return
 
@@ -117,7 +118,7 @@ def run_etl_incremental():
             operation=OPERACAO,
             status="SUCCESS",
             start_time=start_time_dt,
-            end_time=datetime.datetime.now(),
+            end_time=now_sao_paulo_naive(),
         )
     except Exception as e:
         logger.exception("Pipeline ETL incremental falhou")
@@ -125,7 +126,7 @@ def run_etl_incremental():
             operation=OPERACAO,
             status="FAILED",
             start_time=start_time_dt,
-            end_time=datetime.datetime.now(),
+            end_time=now_sao_paulo_naive(),
             error_reason=str(e),
         )
 

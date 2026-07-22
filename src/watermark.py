@@ -1,10 +1,11 @@
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
 from config.settings import POSTGRES_SCHEMA
 from drivers.database import get_engine
+from utils.date_utils import TIMEZONE_SP
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,11 @@ def get_cutoff_atualizacao(table_name: str) -> datetime | None:
         )
         return None
 
+    # A coluna é "timestamp without time zone" e o DW grava horário local de SP —
+    # é esse o fuso que precisa ser atribuído aqui. O build_updated_at_filter
+    # converte para UTC depois, que é como a API interpreta o filtro.
     if ultima_atualizacao.tzinfo is None:
-        ultima_atualizacao = ultima_atualizacao.replace(tzinfo=timezone.utc)
+        ultima_atualizacao = ultima_atualizacao.replace(tzinfo=TIMEZONE_SP)
 
     cutoff = ultima_atualizacao - timedelta(hours=BUFFER_HORAS)
     logger.info(
