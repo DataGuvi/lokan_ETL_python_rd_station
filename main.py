@@ -66,7 +66,7 @@ def run_etl():
     df = transform_deals(deals, lookups)
 
     logger.info("4. Gravando no banco...")
-    load_to_staging(df, "fato_rd_station_negociacoes")
+    load_to_staging(df, "bronze_rd_station_negociacoes")
     
     logger.info("Pipeline ETL finalizado com sucesso")
 

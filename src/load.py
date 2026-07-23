@@ -1,7 +1,7 @@
 import logging
 
 import pandas as pd
-from sqlalchemy import MetaData, Table, text
+from sqlalchemy import Column, MetaData, Table, text
 
 from config.settings import POSTGRES_SCHEMA
 from drivers.database import get_engine
@@ -15,6 +15,80 @@ COLUNAS_PROTEGIDAS_NO_UPDATE = {"registro_deletado"}
 # Fração máxima da fato que pode ser marcada como deletada numa única rodada.
 # Protege contra paginação incompleta da API marcando a base inteira por engano.
 LIMITE_MARCACAO_DELETADOS = 0.20
+
+
+# Recria a stage do zero, espelhando as colunas da bronze (exceto registro_deletado).
+# DROP + CREATE em vez de só CREATE IF NOT EXISTS: idempotente mesmo se uma execução
+# anterior não tiver conseguido dropar a stage no fim.
+def criar_staging(table_name: str, staging_table_name: str, chave_primaria: str = "id_negociacao") -> None:
+    engine = get_engine()
+    tabela_bronze = Table(table_name, MetaData(), schema=POSTGRES_SCHEMA, autoload_with=engine)
+
+    colunas_stage = [
+        Column(col.name, col.type, primary_key=(col.name == chave_primaria))
+        for col in tabela_bronze.columns
+        if col.name != "registro_deletado"
+    ]
+
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {POSTGRES_SCHEMA}.{staging_table_name}"))
+        Table(staging_table_name, MetaData(), *colunas_stage, schema=POSTGRES_SCHEMA).create(conn)
+
+    logger.info("Stage %s.%s recriada com %d colunas", POSTGRES_SCHEMA, staging_table_name, len(colunas_stage))
+
+
+def dropar_staging(staging_table_name: str) -> None:
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {POSTGRES_SCHEMA}.{staging_table_name}"))
+    logger.info("Stage %s.%s dropada", POSTGRES_SCHEMA, staging_table_name)
+
+
+# Reconstrói a prata inteira a partir da bronze via swap table: cria uma tabela temp
+# com id_produto/descricao_produto "explodidos" (uma linha por produto, casando pela
+# posição via WITH ORDINALITY — id_produto e descricao_produto são montados na mesma
+# ordem em transform_deals), depois troca de lugar com a prata atual atomicamente.
+def reconstruir_prata(bronze_table: str, prata_table: str) -> None:
+    engine = get_engine()
+    tabela_bronze = Table(bronze_table, MetaData(), schema=POSTGRES_SCHEMA, autoload_with=engine)
+
+    colunas_sql = ", ".join(
+        f"p.{col.name}" if col.name in ("id_produto", "descricao_produto") else f"b.{col.name}"
+        for col in tabela_bronze.columns
+    )
+
+    prata_temp = f"{prata_table}_temp"
+    prata_old = f"{prata_table}_old"
+
+    # Sem UNIQUE/PK: uma negociação pode ter o mesmo produto repetido em mais de
+    # uma linha de pedido (mesmo id_produto duas vezes), então (id_negociacao,
+    # id_produto) não é garantidamente único — cada linha explodida é mantida.
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {POSTGRES_SCHEMA}.{prata_temp}"))
+        conn.execute(text(f"""
+            CREATE TABLE {POSTGRES_SCHEMA}.{prata_temp} AS
+            SELECT {colunas_sql}
+            FROM {POSTGRES_SCHEMA}.{bronze_table} b
+            LEFT JOIN LATERAL (
+                SELECT ids.id_produto, descs.descricao_produto
+                FROM unnest(string_to_array(b.id_produto, ', ')) WITH ORDINALITY AS ids(id_produto, ord)
+                JOIN unnest(string_to_array(b.descricao_produto, ', ')) WITH ORDINALITY AS descs(descricao_produto, ord)
+                    ON ids.ord = descs.ord
+            ) p ON true
+        """))
+
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE IF EXISTS {POSTGRES_SCHEMA}.{prata_table} RENAME TO {prata_old}"))
+        conn.execute(text(f"ALTER TABLE {POSTGRES_SCHEMA}.{prata_temp} RENAME TO {prata_table}"))
+        conn.execute(text(f"DROP TABLE IF EXISTS {POSTGRES_SCHEMA}.{prata_old}"))
+
+    logger.info(
+        "Prata %s.%s reconstruída via swap a partir de %s.%s",
+        POSTGRES_SCHEMA,
+        prata_table,
+        POSTGRES_SCHEMA,
+        bronze_table,
+    )
 
 
 def load_to_staging(df: pd.DataFrame, table_name: str, if_exists: str = "replace") -> None:
