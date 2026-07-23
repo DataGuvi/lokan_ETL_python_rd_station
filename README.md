@@ -39,10 +39,10 @@ RD Station CRM API V2
    src/transform.py        ← achatamento, tradução de colunas, limpeza
         │
         ▼
-   src/load.py             ← carga, upsert via stage, soft delete
+   src/load.py             ← carga, upsert via stage, soft delete, swap da prata
         │
         ▼
-PostgreSQL (schema dw_rdstation)
+PostgreSQL (schema dw_rdstation) — camadas bronze e prata (esquema medalhão)
 ```
 ## OAuth 2.0
 
@@ -85,9 +85,9 @@ Sem esses dois valores atualizados, a autenticação falha ao rodar localmente.
 
 Schema padrão: `dw_rdstation` (configurável via `POSTGRES_SCHEMA`).
 
-### `fato_rd_station_negociacoes`
+### `bronze_rd_station_negociacoes`
 
-Tabela fato com uma linha por negociação. PK em `id_negociacao`.
+Camada bronze (esquema medalhão): uma linha por negociação, com os lookups já resolvidos. PK em `id_negociacao`. Renomeada de `fato_rd_station_negociacoes`.
 
 | Coluna | Tipo | Descrição |
 |---|---|---|
@@ -111,9 +111,17 @@ Tabela fato com uma linha por negociação. PK em `id_negociacao`.
 | `time_import` | timestamp | Momento da carga (NOT NULL) |
 | `registro_deletado` | boolean | `true` quando a negociação foi excluída no RD Station |
 
+### `prata_rd_station_negociacoes`
+
+Camada prata (esquema medalhão): mesmas colunas da bronze, mas com `id_produto`/`descricao_produto` "explodidos" — uma linha por produto vinculado à negociação, em vez de valores concatenados por vírgula. Por isso `id_negociacao` deixa de ser PK (uma negociação com N produtos gera N linhas) e a tabela **não tem chave única**: uma mesma negociação pode ter o mesmo `id_produto` repetido em mais de uma linha de pedido (produto comprado em lotes separados), então `(id_negociacao, id_produto)` não é garantidamente único.
+
+Reconstruída por inteiro a cada execução do pipeline incremental, via *swap table*: cria `prata_rd_station_negociacoes_temp` a partir da bronze, renomeia a tabela atual para `_old`, renomeia a `_temp` para o nome definitivo e dropa a `_old`. Não existe carga incremental na prata — é sempre um rebuild completo.
+
 ### `stg_rd_station_negociacoes`
 
-Tabela de trabalho, com as mesmas colunas da fato (exceto `registro_deletado`). É **truncada no início de cada uso** e serve a dois propósitos: receber o lote do upsert incremental e receber a lista de ids ativos na comparação de exclusões.
+Tabela de trabalho, com as mesmas colunas da bronze (exceto `registro_deletado`). **Criada no início do pipeline incremental e sempre dropada ao final da execução** (sucesso, early-return ou falha) — não existe fora de uma execução do pipeline. Durante a execução, é truncada e recarregada duas vezes, servindo a dois propósitos: receber a lista de ids ativos na comparação de exclusões, e depois receber o lote do upsert incremental.
+
+Em repouso, o schema `dw_rdstation` tem apenas três tabelas: `etl_execution_logs`, `bronze_rd_station_negociacoes` e `prata_rd_station_negociacoes`.
 
 ### `etl_execution_logs`
 
@@ -132,12 +140,14 @@ Log de execuções, compartilhado entre projetos de ETL.
 
 ### Full load — `main.py`
 
-Recarrega a base inteira. **Faz `TRUNCATE` na fato antes de inserir.**
+Recarrega a base inteira. **Faz `TRUNCATE` na bronze antes de inserir.**
 
 1. Extrai todos os deals (varredura convergente, veja abaixo)
 2. Monta os lookups: vendedores, origens, motivos de perda, organizações, contatos e produtos
 3. Transforma para o modelo do DW
-4. `TRUNCATE` + `INSERT` em `fato_rd_station_negociacoes`
+4. `TRUNCATE` + `INSERT` em `bronze_rd_station_negociacoes`
+
+> A prata não é reconstruída pelo full load — ela só é reconstruída pelo incremental (passo 7 abaixo).
 
 > ⚠️ O `TRUNCATE` apaga também a marcação de `registro_deletado` e qualquer linha inserida manualmente.
 
@@ -145,28 +155,31 @@ Recarrega a base inteira. **Faz `TRUNCATE` na fato antes de inserir.**
 
 Processa apenas o que mudou desde a última carga.
 
-1. **Cutoff**: lê `MAX(data_atualizacao)` da fato e subtrai 2h de margem (`src/watermark.py`). Se a tabela estiver vazia, aborta pedindo o full load
-2. **Extração**: busca os deals com `updated_at >= cutoff`
-3. **Exclusões**: detecta e marca negociações removidas na origem (veja a seção seguinte) — roda **sempre**, mesmo quando nada foi atualizado, porque exclusão não gera evento de atualização
-4. **Lookups**: busca apenas os relacionamentos dos deals do lote
-5. **Transformação**
-6. **Upsert via stage**: carrega o lote na stage, faz `INSERT` dos ids novos e `UPDATE` dos existentes — nunca `TRUNCATE` na fato
+1. **Cutoff**: lê `MAX(data_atualizacao)` da bronze e subtrai 2h de margem (`src/watermark.py`). Se a tabela estiver vazia, aborta pedindo o full load
+2. **Stage**: recria `stg_rd_station_negociacoes` do zero (`criar_staging`), espelhando as colunas da bronze
+3. **Extração**: busca os deals com `updated_at >= cutoff`
+4. **Exclusões**: detecta e marca negociações removidas na origem (veja a seção seguinte) — roda **sempre**, mesmo quando nada foi atualizado, porque exclusão não gera evento de atualização
+5. **Lookups**: busca apenas os relacionamentos dos deals do lote
+6. **Transformação**
+7. **Upsert via stage**: carrega o lote na stage, faz `INSERT` dos ids novos e `UPDATE` dos existentes — nunca `TRUNCATE` na bronze
+8. **Stage**: dropa `stg_rd_station_negociacoes` (`dropar_staging`), sempre — mesmo se algum passo acima falhar
+9. **Prata**: reconstrói `prata_rd_station_negociacoes` por inteiro a partir da bronze, via swap table — roda mesmo quando não há deals novos, já que a marcação de exclusões (passo 4) pode ter alterado a bronze
 
 A coluna `registro_deletado` está em `COLUNAS_PROTEGIDAS_NO_UPDATE` (`src/load.py`) e nunca é sobrescrita pelo upsert.
 
 ## Detecção de registros excluídos
 
-O RD Station não notifica exclusões: a negociação simplesmente some da listagem. Sem tratamento, a fato acumularia para sempre registros que não existem mais, inflando contagens e valores.
+O RD Station não notifica exclusões: a negociação simplesmente some da listagem. Sem tratamento, a bronze acumularia para sempre registros que não existem mais, inflando contagens e valores.
 
 O processo é um **soft delete em três etapas**, e nenhuma linha é apagada fisicamente:
 
-1. **Levantar candidatos** — os ids da listagem completa vão para a stage; todo id que está na fato e não está na stage vira candidato. Na mesma etapa, ids que reapareceram têm `registro_deletado` devolvido para `false`
+1. **Levantar candidatos** — os ids da listagem completa vão para a stage; todo id que está na bronze e não está na stage vira candidato. Na mesma etapa, ids que reapareceram têm `registro_deletado` devolvido para `false`
 2. **Confirmar um a um** — cada candidato é consultado com `GET /deals/{id}`. **Só HTTP 404 conta como exclusão**; qualquer outro erro é tratado como "não sei" e o registro não é marcado
 3. **Marcar** — `registro_deletado = true` nos confirmados
 
 A etapa 2 é indispensável: a listagem da API não é confiável (veja abaixo). Em um teste real, os 155 candidatos levantados pela comparação eram **todos falsos positivos** — negociações vivas que a paginação havia pulado.
 
-Como rede de segurança, `LIMITE_MARCACAO_DELETADOS` (20%) aborta a operação se uma única execução tentar marcar mais de 20% da fato.
+Como rede de segurança, `LIMITE_MARCACAO_DELETADOS` (20%) aborta a operação se uma única execução tentar marcar mais de 20% da bronze.
 
 ## Particularidades da API do RD Station
 
@@ -219,14 +232,14 @@ O `access_token` e o `refresh_token` são renovados automaticamente e **reescrit
 ## Como executar
 
 ```bash
-# Carga completa — recria a fato do zero
+# Carga completa — recria a bronze do zero
 python main.py
 
-# Carga incremental — atualiza o que mudou e marca as exclusões
+# Carga incremental — atualiza o que mudou, marca as exclusões e reconstrói a prata
 python main_incremental.py
 ```
 
-O incremental depende de a fato já ter dados: sem `MAX(data_atualizacao)` não há watermark, e a execução falha pedindo o full load.
+O incremental depende de a bronze já ter dados: sem `MAX(data_atualizacao)` não há watermark, e a execução falha pedindo o full load.
 
 Em produção, o esperado é rodar o **full load uma vez** e agendar o **incremental** na frequência desejada.
 
@@ -243,8 +256,12 @@ FROM dw_rdstation.etl_execution_logs
 ORDER BY id DESC
 LIMIT 10;
 
--- Panorama da fato
+-- Panorama da bronze
 SELECT registro_deletado, COUNT(*)
-FROM dw_rdstation.fato_rd_station_negociacoes
+FROM dw_rdstation.bronze_rd_station_negociacoes
 GROUP BY registro_deletado;
+
+-- Confere se a prata está em dia com a bronze
+SELECT COUNT(DISTINCT id_negociacao) FROM dw_rdstation.bronze_rd_station_negociacoes;
+SELECT COUNT(DISTINCT id_negociacao) FROM dw_rdstation.prata_rd_station_negociacoes;
 ```
