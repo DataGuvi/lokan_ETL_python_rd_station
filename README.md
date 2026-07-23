@@ -9,6 +9,7 @@ Além da carga, o pipeline incremental detecta **negociações excluídas na ori
 ## Sumário
 
 - [Arquitetura](#arquitetura)
+- [OAuth 2.0](#oauth-20)
 - [Estrutura do projeto](#estrutura-do-projeto)
 - [Tabelas no PostgreSQL](#tabelas-no-postgresql)
 - [Fluxos de execução](#fluxos-de-execução)
@@ -42,6 +43,20 @@ RD Station CRM API V2
         │
         ▼
 PostgreSQL (schema dw_rdstation)
+```
+## OAuth 2.0
+
+```
+A autenticação da API da Lokan do RD Station V2 depende de um access_code, que é gerado automaticamente pela pipeline durante a execução e salvo no .env do servidor.
+
+Como a pipeline roda no servidor 1, para executar o projeto localmente na IDE é necessário:
+
+Acessar o .env do servidor 1;
+Copiar o access_code gerado por lá;
+Copiar também o refresh_token correspondente;
+Colar ambos os valores no .env local do seu ambiente de desenvolvimento.
+
+Sem esses dois valores atualizados, a autenticação falha ao rodar localmente.
 ```
 
 ## Estrutura do projeto
