@@ -6,6 +6,12 @@ from utils.date_utils import TIMEZONE_SP
 
 logger = logging.getLogger(__name__)
 
+STATUS_TRADUZIDO = {
+    "Lost": "Encerrado",
+    "Ongoing": "Ativo",
+    "Won": "Fechado",
+}
+
 
 # A API devolve "" (ou só espaços) para campo em branco — no banco isso deve virar NULL
 def vazio_para_none(valor):
@@ -70,7 +76,7 @@ def transform_deals(deals: list[dict], lookups: dict) -> pd.DataFrame:
             "descricao_origem": lookup_origens.get(source_id, ""),
             "id_vendedor": owner_id,
             "descricao_vendedor": lookup_vendedores.get(owner_id, ""),
-            "status_negociacao": deal.get("status"),
+            "status_negociacao": STATUS_TRADUZIDO.get(deal.get("status"), deal.get("status")),
             "id_motivo_perda": lost_reason_id,
             "descricao_motivo_perda": lookup_motivos_perda.get(lost_reason_id, ""),
             "descricao_municipio": custom_fields.get("cidade-teste"),
